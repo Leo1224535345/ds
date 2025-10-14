@@ -19,31 +19,124 @@ ArrayJobMatcher::~ArrayJobMatcher() {
 }
 
 bool ArrayJobMatcher::loadJobsFromCSV(const std::string& filename) {
+    // Clear previous errors
+    errorHandler.clearErrors();
+    
+    // Validate file format
+    if (!validateFileFormat(filename)) {
+        return false;
+    }
+    
+    // Validate memory allocation
+    if (!validateMemoryAllocation()) {
+        return false;
+    }
+    
     std::ifstream file(filename);
     if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filename << std::endl;
+        errorHandler.logError(ErrorHandler::FILE_ERROR, 
+            "Could not open file: " + filename, "loadJobsFromCSV");
+        std::cerr << "❌ Error: Could not open file " << filename << std::endl;
+        return false;
+    }
+    
+    // Check if file is empty
+    if (file.peek() == std::ifstream::traits_type::eof()) {
+        errorHandler.logError(ErrorHandler::FILE_ERROR, 
+            "File is empty: " + filename, "loadJobsFromCSV");
+        std::cerr << "❌ Error: File " << filename << " is empty" << std::endl;
+        file.close();
         return false;
     }
     
     std::string line;
-    std::getline(file, line); // Skip header
+    int lineNumber = 0;
+    int validJobs = 0;
+    int invalidJobs = 0;
+    
+    // Skip header and validate
+    if (std::getline(file, line)) {
+        lineNumber++;
+        if (line.empty()) {
+            errorHandler.logWarning("Empty header line detected", "Line " + std::to_string(lineNumber));
+        }
+    } else {
+        errorHandler.logError(ErrorHandler::FILE_ERROR, 
+            "Could not read header from file: " + filename, "loadJobsFromCSV");
+        file.close();
+        return false;
+    }
     
     int jobId = 1;
     while (std::getline(file, line) && jobCount < maxJobs) {
-        // Remove quotes and clean the line
-        if (line.front() == '"' && line.back() == '"') {
-            line = line.substr(1, line.length() - 2);
+        lineNumber++;
+        
+        // Validate line length
+        if (line.length() > 10000) { // Reasonable limit
+            errorHandler.logWarning("Line " + std::to_string(lineNumber) + " exceeds maximum length", 
+                "Skipping oversized line");
+            invalidJobs++;
+            continue;
         }
         
-        if (!line.empty()) {
-            jobs[jobCount] = Job(jobId, line);
+        // Remove quotes and clean the line
+        std::string cleanedLine = line;
+        if (line.length() >= 2 && line.front() == '"' && line.back() == '"') {
+            cleanedLine = line.substr(1, line.length() - 2);
+        }
+        
+        // Validate cleaned line
+        if (cleanedLine.empty()) {
+            errorHandler.logWarning("Empty job description at line " + std::to_string(lineNumber), 
+                "Skipping empty entry");
+            invalidJobs++;
+            continue;
+        }
+        
+        // Check for suspicious content
+        if (cleanedLine.length() < 10) {
+            errorHandler.logWarning("Very short job description at line " + std::to_string(lineNumber), 
+                "Description may be incomplete");
+        }
+        
+        try {
+            jobs[jobCount] = Job(jobId, cleanedLine);
             jobCount++;
             jobId++;
+            validJobs++;
+        } catch (const std::exception& e) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Failed to create job from line " + std::to_string(lineNumber) + ": " + e.what(), 
+                "Job ID: " + std::to_string(jobId));
+            invalidJobs++;
         }
     }
     
     file.close();
+    
+    // Validate data integrity after loading
+    if (!validateDataIntegrity()) {
+        return false;
+    }
+    
+    // Log summary
+    if (invalidJobs > 0) {
+        errorHandler.logWarning("Loaded " + std::to_string(validJobs) + " valid jobs, " + 
+            std::to_string(invalidJobs) + " invalid entries skipped", "Data loading summary");
+    }
+    
+    if (jobCount >= maxJobs) {
+        errorHandler.logWarning("Reached maximum job capacity (" + std::to_string(maxJobs) + ")", 
+            "Some jobs may not have been loaded");
+    }
+    
     calculateMemoryUsage();
+    
+    std::cout << "✅ Successfully loaded " << jobCount << " jobs from " << filename << std::endl;
+    if (errorHandler.hasWarnings) {
+        std::cout << "⚠️  " << errorHandler.errorLog.size() << " warnings detected" << std::endl;
+    }
+    
     return true;
 }
 
@@ -110,10 +203,45 @@ ArrayJobMatcher::Resume* ArrayJobMatcher::getResume(int index) {
     return nullptr;
 }
 
-std::vector<ArrayJobMatcher::MatchResult> ArrayJobMatcher::findMatches(int resumeId, int topK) {
+ArrayJobMatcher::Job ArrayJobMatcher::getJobById(int id) {
+    for (int i = 0; i < jobCount; i++) {
+        if (jobs[i].id == id) {
+            return jobs[i];
+        }
+    }
+    return Job{}; // Return empty job if not found
+}
+
+ArrayJobMatcher::Resume ArrayJobMatcher::getResumeById(int id) {
+    for (int i = 0; i < resumeCount; i++) {
+        if (resumes[i].id == id) {
+            return resumes[i];
+        }
+    }
+    return Resume{}; // Return empty resume if not found
+}
+
+DynamicArray<ArrayJobMatcher::MatchResult> ArrayJobMatcher::findMatches(int resumeId, int topK) {
     auto start = std::chrono::high_resolution_clock::now();
     
-    std::vector<MatchResult> allMatches;
+    DynamicArray<MatchResult> allMatches;
+    
+    // Validate input parameters
+    if (!validateInputParameters(1, resumeId)) { // Use dummy jobId for validation
+        return allMatches;
+    }
+    
+    // Validate topK parameter
+    if (topK <= 0) {
+        errorHandler.logError(ErrorHandler::INPUT_VALIDATION_ERROR, 
+            "Invalid topK parameter: " + std::to_string(topK) + " (must be positive)", "findMatches");
+        return allMatches;
+    }
+    
+    if (topK > 10000) { // Reasonable limit to prevent excessive memory usage
+        errorHandler.logWarning("Large topK value: " + std::to_string(topK), 
+            "Performance may be affected");
+    }
     
     // Find the resume
     Resume* targetResume = nullptr;
@@ -125,41 +253,90 @@ std::vector<ArrayJobMatcher::MatchResult> ArrayJobMatcher::findMatches(int resum
     }
     
     if (!targetResume) {
-        std::cerr << "Resume with ID " << resumeId << " not found" << std::endl;
+        errorHandler.logError(ErrorHandler::BOUNDS_ERROR, 
+            "Resume with ID " + std::to_string(resumeId) + " not found", "findMatches");
+        std::cerr << "❌ Resume with ID " << resumeId << " not found" << std::endl;
         return allMatches;
     }
     
+    // Validate resume data
+    if (targetResume->skills.empty()) {
+        errorHandler.logWarning("Resume " + std::to_string(resumeId) + " has no skills", 
+            "Matching may not be accurate");
+    }
+    
     // Calculate match scores for all jobs
+    int processedJobs = 0;
+    int skippedJobs = 0;
+    
     for (int i = 0; i < jobCount; i++) {
-        double score = calculateAdvancedMatchScore(jobs[i], *targetResume);
-        MatchResult match(jobs[i].id, resumeId, score);
-        match.commonSkills = findCommonSkills(jobs[i], *targetResume);
-        allMatches.push_back(match);
+        try {
+            // Validate job data
+            if (jobs[i].skills.empty()) {
+                skippedJobs++;
+                continue;
+            }
+            
+            double score = calculateAdvancedMatchScore(jobs[i], *targetResume);
+            MatchResult match(jobs[i].id, resumeId, score);
+            match.commonSkills = findCommonSkills(jobs[i], *targetResume);
+            allMatches.push_back(match);
+            processedJobs++;
+            
+        } catch (const std::exception& e) {
+            errorHandler.logError(ErrorHandler::SYSTEM_ERROR, 
+                "Error processing job " + std::to_string(jobs[i].id) + ": " + e.what(), "findMatches");
+            skippedJobs++;
+        }
+    }
+    
+    // Log processing summary
+    if (skippedJobs > 0) {
+        errorHandler.logWarning("Skipped " + std::to_string(skippedJobs) + " jobs during matching", 
+            "Processing summary");
+    }
+    
+    if (allMatches.empty()) {
+        errorHandler.logWarning("No matches found for resume " + std::to_string(resumeId), 
+            "Matching results");
+        return allMatches;
     }
     
     // Sort matches by score (descending)
-    std::sort(allMatches.begin(), allMatches.end(), 
-              [](const MatchResult& a, const MatchResult& b) {
-                  return a.overallScore > b.overallScore;
-              });
+    try {
+        std::sort(allMatches.begin(), allMatches.end(), 
+                  [](const MatchResult& a, const MatchResult& b) {
+                      return a.overallScore > b.overallScore;
+                  });
+    } catch (const std::exception& e) {
+        errorHandler.logError(ErrorHandler::SYSTEM_ERROR, 
+            "Error sorting matches: " + std::string(e.what()), "findMatches");
+        return allMatches;
+    }
     
     // Return top K matches
     if (topK > static_cast<int>(allMatches.size())) {
         topK = static_cast<int>(allMatches.size());
     }
     
-    std::vector<MatchResult> topMatches(allMatches.begin(), allMatches.begin() + topK);
+    DynamicArray<MatchResult> topMatches;
+    for (size_t i = 0; i < static_cast<size_t>(topK) && i < allMatches.size(); ++i) {
+        topMatches.push_back(allMatches[i]);
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
     
+    std::cout << "✅ Found " << topMatches.size() << " matches for resume " << resumeId 
+              << " (processed " << processedJobs << " jobs)" << std::endl;
+    
     return topMatches;
 }
 
-std::vector<ArrayJobMatcher::MatchResult> ArrayJobMatcher::findMatchesForJob(int jobId, int topK) {
+DynamicArray<ArrayJobMatcher::MatchResult> ArrayJobMatcher::findMatchesForJob(int jobId, int topK) {
     auto start = std::chrono::high_resolution_clock::now();
     
-    std::vector<MatchResult> allMatches;
+    DynamicArray<MatchResult> allMatches;
     
     // Find the job
     Job* targetJob = nullptr;
@@ -194,7 +371,10 @@ std::vector<ArrayJobMatcher::MatchResult> ArrayJobMatcher::findMatchesForJob(int
         topK = static_cast<int>(allMatches.size());
     }
     
-    std::vector<MatchResult> topMatches(allMatches.begin(), allMatches.begin() + topK);
+    DynamicArray<MatchResult> topMatches;
+    for (size_t i = 0; i < static_cast<size_t>(topK) && i < allMatches.size(); ++i) {
+        topMatches.push_back(allMatches[i]);
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
@@ -208,7 +388,7 @@ double ArrayJobMatcher::calculateAdvancedMatchScore(const Job& job, const Resume
     }
     
     // Find common skills
-    std::vector<std::string> commonSkills = findCommonSkills(job, resume);
+    StringArray commonSkills = findCommonSkills(job, resume);
     
     // Calculate weighted score
     double skillMatchRatio = (double)commonSkills.size() / job.skills.size();
@@ -233,8 +413,8 @@ double ArrayJobMatcher::calculateAdvancedMatchScore(const Job& job, const Resume
     return std::min(score, 1.0); // Cap at 1.0
 }
 
-std::vector<std::string> ArrayJobMatcher::findCommonSkills(const Job& job, const Resume& resume) {
-    std::vector<std::string> commonSkills;
+StringArray ArrayJobMatcher::findCommonSkills(const Job& job, const Resume& resume) {
+    StringArray commonSkills;
     
     for (const auto& jobSkill : job.skills) {
         for (const auto& resumeSkill : resume.skills) {
@@ -417,11 +597,11 @@ void ArrayJobMatcher::resetPerformanceCounters() {
     metrics.reset();
 }
 
-void ArrayJobMatcher::displayTopMatches(const std::vector<MatchResult>& matches, int count) {
+void ArrayJobMatcher::displayTopMatches(const DynamicArray<MatchResult>& matches, int count) {
     std::cout << "\n=== Top " << count << " Matches ===" << std::endl;
     std::cout << std::fixed << std::setprecision(3);
     
-    for (int i = 0; i < std::min(count, (int)matches.size()); i++) {
+    for (int i = 0; i < std::min(count, static_cast<int>(matches.size())); i++) {
         const auto& match = matches[i];
         std::cout << "\nMatch " << (i + 1) << ":" << std::endl;
         std::cout << "  Job ID: " << match.jobId << std::endl;
@@ -472,5 +652,511 @@ void ArrayJobMatcher::validateData() {
         std::cout << "Warning: Some data entries are invalid!" << std::endl;
     } else {
         std::cout << "All data entries are valid." << std::endl;
+    }
+}
+
+// Advanced filtering operations
+DynamicArray<ArrayJobMatcher::Job*> ArrayJobMatcher::searchJobsBySkill(const std::string& skill) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Job*> result;
+    result.reserve(jobCount / 10); // Reserve space for estimated matches
+    std::string lowerSkill = toLowerCase(skill);
+    
+    for (int i = 0; i < jobCount; i++) {
+        for (const auto& jobSkill : jobs[i].skills) {
+            if (toLowerCase(jobSkill) == lowerSkill) {
+                result.push_back(&jobs[i]);
+                break;
+            }
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Resume*> ArrayJobMatcher::searchResumesBySkill(const std::string& skill) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Resume*> result;
+    result.reserve(resumeCount / 10); // Reserve space for estimated matches
+    std::string lowerSkill = toLowerCase(skill);
+    
+    for (int i = 0; i < resumeCount; i++) {
+        for (const auto& resumeSkill : resumes[i].skills) {
+            if (toLowerCase(resumeSkill) == lowerSkill) {
+                result.push_back(&resumes[i]);
+                break;
+            }
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Job*> ArrayJobMatcher::searchJobsByScoreRange(double minScore, double maxScore) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Job*> result;
+    
+    for (int i = 0; i < jobCount; i++) {
+        if (jobs[i].matchScore >= minScore && jobs[i].matchScore <= maxScore) {
+            result.push_back(&jobs[i]);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Resume*> ArrayJobMatcher::searchResumesByScoreRange(double minScore, double maxScore) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Resume*> result;
+    
+    for (int i = 0; i < resumeCount; i++) {
+        if (resumes[i].matchScore >= minScore && resumes[i].matchScore <= maxScore) {
+            result.push_back(&resumes[i]);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Job*> ArrayJobMatcher::filterJobsBySkillCount(int minSkills, int maxSkills) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Job*> result;
+    
+    for (int i = 0; i < jobCount; i++) {
+        int skillCount = static_cast<int>(jobs[i].skills.size());
+        if (skillCount >= minSkills && skillCount <= maxSkills) {
+            result.push_back(&jobs[i]);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Resume*> ArrayJobMatcher::filterResumesBySkillCount(int minSkills, int maxSkills) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Resume*> result;
+    
+    for (int i = 0; i < resumeCount; i++) {
+        int skillCount = static_cast<int>(resumes[i].skills.size());
+        if (skillCount >= minSkills && skillCount <= maxSkills) {
+            result.push_back(&resumes[i]);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Job*> ArrayJobMatcher::filterJobsByDescription(const std::string& keyword) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Job*> result;
+    std::string lowerKeyword = toLowerCase(keyword);
+    
+    for (int i = 0; i < jobCount; i++) {
+        if (toLowerCase(jobs[i].description).find(lowerKeyword) != std::string::npos) {
+            result.push_back(&jobs[i]);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<ArrayJobMatcher::Resume*> ArrayJobMatcher::filterResumesByDescription(const std::string& keyword) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<Resume*> result;
+    std::string lowerKeyword = toLowerCase(keyword);
+    
+    for (int i = 0; i < resumeCount; i++) {
+        if (toLowerCase(resumes[i].description).find(lowerKeyword) != std::string::npos) {
+            result.push_back(&resumes[i]);
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+std::string ArrayJobMatcher::toLowerCase(const std::string& str) {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
+
+// Comprehensive error handling and validation methods
+bool ArrayJobMatcher::validateFileFormat(const std::string& filename) {
+    // Check file extension
+    if (filename.length() < 4 || filename.substr(filename.length() - 4) != ".csv") {
+        errorHandler.logError(ErrorHandler::FORMAT_ERROR, 
+            "Invalid file format: " + filename + " (expected .csv)", "validateFileFormat");
+        return false;
+    }
+    
+    // Check if file exists
+    std::ifstream testFile(filename);
+    if (!testFile.good()) {
+        errorHandler.logError(ErrorHandler::FILE_ERROR, 
+            "File does not exist or is not accessible: " + filename, "validateFileFormat");
+        return false;
+    }
+    testFile.close();
+    
+    return true;
+}
+
+bool ArrayJobMatcher::validateMemoryAllocation() {
+    if (jobs == nullptr || resumes == nullptr) {
+        errorHandler.logError(ErrorHandler::MEMORY_ERROR, 
+            "Memory allocation failed for jobs or resumes arrays", "validateMemoryAllocation");
+        return false;
+    }
+    
+    if (maxJobs <= 0 || maxResumes <= 0) {
+        errorHandler.logError(ErrorHandler::MEMORY_ERROR, 
+            "Invalid maximum size parameters: maxJobs=" + std::to_string(maxJobs) + 
+            ", maxResumes=" + std::to_string(maxResumes), "validateMemoryAllocation");
+        return false;
+    }
+    
+    return true;
+}
+
+bool ArrayJobMatcher::validateDataIntegrity() {
+    bool isValid = true;
+    
+    // Validate job data
+    for (int i = 0; i < jobCount; i++) {
+        if (jobs[i].id <= 0) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Invalid job ID at index " + std::to_string(i), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (jobs[i].description.empty()) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Empty job description at index " + std::to_string(i), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (jobs[i].skills.empty()) {
+            errorHandler.logWarning("Job " + std::to_string(jobs[i].id) + " has no skills extracted", 
+                "Data validation");
+        }
+    }
+    
+    // Validate resume data
+    for (int i = 0; i < resumeCount; i++) {
+        if (resumes[i].id <= 0) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Invalid resume ID at index " + std::to_string(i), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (resumes[i].description.empty()) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Empty resume description at index " + std::to_string(i), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (resumes[i].skills.empty()) {
+            errorHandler.logWarning("Resume " + std::to_string(resumes[i].id) + " has no skills extracted", 
+                "Data validation");
+        }
+    }
+    
+    return isValid;
+}
+
+bool ArrayJobMatcher::validateInputParameters(int jobId, int resumeId) {
+    bool isValid = true;
+    
+    if (jobId <= 0) {
+        errorHandler.logError(ErrorHandler::INPUT_VALIDATION_ERROR, 
+            "Invalid job ID: " + std::to_string(jobId) + " (must be positive)", "validateInputParameters");
+        isValid = false;
+    }
+    
+    if (resumeId <= 0) {
+        errorHandler.logError(ErrorHandler::INPUT_VALIDATION_ERROR, 
+            "Invalid resume ID: " + std::to_string(resumeId) + " (must be positive)", "validateInputParameters");
+        isValid = false;
+    }
+    
+    if (jobId > jobCount) {
+        errorHandler.logError(ErrorHandler::BOUNDS_ERROR, 
+            "Job ID " + std::to_string(jobId) + " exceeds available jobs (" + std::to_string(jobCount) + ")", 
+            "validateInputParameters");
+        isValid = false;
+    }
+    
+    if (resumeId > resumeCount) {
+        errorHandler.logError(ErrorHandler::BOUNDS_ERROR, 
+            "Resume ID " + std::to_string(resumeId) + " exceeds available resumes (" + std::to_string(resumeCount) + ")", 
+            "validateInputParameters");
+        isValid = false;
+    }
+    
+    return isValid;
+}
+
+void ArrayJobMatcher::handleError(const std::string& operation, const std::string& error) {
+    errorHandler.logError(ErrorHandler::SYSTEM_ERROR, 
+        "Error in " + operation + ": " + error, "handleError");
+    std::cerr << "❌ Error in " << operation << ": " << error << std::endl;
+}
+
+// Additional missing method implementations
+ArrayJobMatcher::Job* ArrayJobMatcher::interpolationSearchJob(int jobId) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // First, sort by ID for interpolation search
+    std::sort(jobs, jobs + jobCount, [](const Job& a, const Job& b) {
+        return a.id < b.id;
+    });
+    
+    int left = 0;
+    int right = jobCount - 1;
+    
+    while (left <= right && jobId >= jobs[left].id && jobId <= jobs[right].id) {
+        if (left == right) {
+            if (jobs[left].id == jobId) {
+                auto end = std::chrono::high_resolution_clock::now();
+                metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+                return &jobs[left];
+            }
+            break;
+        }
+        
+        // Interpolation formula
+        int pos = left + ((jobId - jobs[left].id) * (right - left)) / (jobs[right].id - jobs[left].id);
+        
+        if (jobs[pos].id == jobId) {
+            auto end = std::chrono::high_resolution_clock::now();
+            metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+            return &jobs[pos];
+        }
+        
+        if (jobs[pos].id < jobId) {
+            left = pos + 1;
+        } else {
+            right = pos - 1;
+        }
+        
+        metrics.comparisons++;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    return nullptr;
+}
+
+ArrayJobMatcher::Resume* ArrayJobMatcher::interpolationSearchResume(int resumeId) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // First, sort by ID for interpolation search
+    std::sort(resumes, resumes + resumeCount, [](const Resume& a, const Resume& b) {
+        return a.id < b.id;
+    });
+    
+    int left = 0;
+    int right = resumeCount - 1;
+    
+    while (left <= right && resumeId >= resumes[left].id && resumeId <= resumes[right].id) {
+        if (left == right) {
+            if (resumes[left].id == resumeId) {
+                auto end = std::chrono::high_resolution_clock::now();
+                metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+                return &resumes[left];
+            }
+            break;
+        }
+        
+        // Interpolation formula
+        int pos = left + ((resumeId - resumes[left].id) * (right - left)) / (resumes[right].id - resumes[left].id);
+        
+        if (resumes[pos].id == resumeId) {
+            auto end = std::chrono::high_resolution_clock::now();
+            metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+            return &resumes[pos];
+        }
+        
+        if (resumes[pos].id < resumeId) {
+            left = pos + 1;
+        } else {
+            right = pos - 1;
+        }
+        
+        metrics.comparisons++;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    metrics.lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    return nullptr;
+}
+
+int ArrayJobMatcher::partitionJobs3Way(int low, int high) {
+    if (low >= high) return low;
+    
+    double pivot = jobs[low].matchScore;
+    int lt = low;      // jobs[low..lt-1] < pivot
+    int gt = high;     // jobs[gt+1..high] > pivot
+    int i = low + 1;   // jobs[lt..i-1] == pivot
+    
+    while (i <= gt) {
+        if (jobs[i].matchScore < pivot) {
+            std::swap(jobs[lt++], jobs[i++]);
+            metrics.swaps++;
+        } else if (jobs[i].matchScore > pivot) {
+            std::swap(jobs[i], jobs[gt--]);
+            metrics.swaps++;
+        } else {
+            i++;
+        }
+        metrics.comparisons++;
+    }
+    
+    return lt;
+}
+
+int ArrayJobMatcher::partitionResumes3Way(int low, int high) {
+    if (low >= high) return low;
+    
+    double pivot = resumes[low].matchScore;
+    int lt = low;      // resumes[low..lt-1] < pivot
+    int gt = high;     // resumes[gt+1..high] > pivot
+    int i = low + 1;   // resumes[lt..i-1] == pivot
+    
+    while (i <= gt) {
+        if (resumes[i].matchScore < pivot) {
+            std::swap(resumes[lt++], resumes[i++]);
+            metrics.swaps++;
+        } else if (resumes[i].matchScore > pivot) {
+            std::swap(resumes[i], resumes[gt--]);
+            metrics.swaps++;
+        } else {
+            i++;
+        }
+        metrics.comparisons++;
+    }
+    
+    return lt;
+}
+
+void ArrayJobMatcher::introsortJobs(int low, int high, int depthLimit) {
+    if (low < high) {
+        if (high - low < 16) {
+            // Use insertion sort for small arrays
+            insertionSortJobs(low, high);
+        } else if (depthLimit == 0) {
+            // Use heap sort as fallback
+            std::make_heap(jobs + low, jobs + high + 1);
+            std::sort_heap(jobs + low, jobs + high + 1);
+        } else {
+            // Use quicksort with 3-way partitioning
+            int pivotIndex = partitionJobs3Way(low, high);
+            introsortJobs(low, pivotIndex - 1, depthLimit - 1);
+            introsortJobs(pivotIndex + 1, high, depthLimit - 1);
+        }
+    }
+}
+
+void ArrayJobMatcher::introsortResumes(int low, int high, int depthLimit) {
+    if (low < high) {
+        if (high - low < 16) {
+            // Use insertion sort for small arrays
+            insertionSortResumes(low, high);
+        } else if (depthLimit == 0) {
+            // Use heap sort as fallback
+            std::make_heap(resumes + low, resumes + high + 1);
+            std::sort_heap(resumes + low, resumes + high + 1);
+        } else {
+            // Use quicksort with 3-way partitioning
+            int pivotIndex = partitionResumes3Way(low, high);
+            introsortResumes(low, pivotIndex - 1, depthLimit - 1);
+            introsortResumes(pivotIndex + 1, high, depthLimit - 1);
+        }
+    }
+}
+
+void ArrayJobMatcher::insertionSortJobs(int low, int high) {
+    for (int i = low + 1; i <= high; i++) {
+        Job key = jobs[i];
+        int j = i - 1;
+        
+        while (j >= low && jobs[j].matchScore < key.matchScore) {
+            jobs[j + 1] = jobs[j];
+            j--;
+            metrics.swaps++;
+        }
+        jobs[j + 1] = key;
+        metrics.comparisons++;
+    }
+}
+
+void ArrayJobMatcher::insertionSortResumes(int low, int high) {
+    for (int i = low + 1; i <= high; i++) {
+        Resume key = resumes[i];
+        int j = i - 1;
+        
+        while (j >= low && resumes[j].matchScore < key.matchScore) {
+            resumes[j + 1] = resumes[j];
+            j--;
+            metrics.swaps++;
+        }
+        resumes[j + 1] = key;
+        metrics.comparisons++;
+    }
+}
+
+int ArrayJobMatcher::medianOfThreeJobs(int low, int mid, int high) {
+    if (jobs[low].matchScore > jobs[mid].matchScore) {
+        if (jobs[mid].matchScore > jobs[high].matchScore) return mid;
+        else if (jobs[low].matchScore > jobs[high].matchScore) return high;
+        else return low;
+    } else {
+        if (jobs[low].matchScore > jobs[high].matchScore) return low;
+        else if (jobs[mid].matchScore > jobs[high].matchScore) return high;
+        else return mid;
+    }
+}
+
+int ArrayJobMatcher::medianOfThreeResumes(int low, int mid, int high) {
+    if (resumes[low].matchScore > resumes[mid].matchScore) {
+        if (resumes[mid].matchScore > resumes[high].matchScore) return mid;
+        else if (resumes[low].matchScore > resumes[high].matchScore) return high;
+        else return low;
+    } else {
+        if (resumes[low].matchScore > resumes[high].matchScore) return low;
+        else if (resumes[mid].matchScore > resumes[high].matchScore) return high;
+        else return mid;
     }
 }

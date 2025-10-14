@@ -93,10 +93,10 @@ void LinkedListJobMatcher::addResume(const ResumeNode& resume) {
     calculateMemoryUsage();
 }
 
-std::vector<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatches(int resumeId, int topK) {
+DynamicArray<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatches(int resumeId, int topK) {
     auto start = std::chrono::high_resolution_clock::now();
     
-    std::vector<MatchResult> allMatches;
+    DynamicArray<MatchResult> allMatches;
     
     // Find the resume
     ResumeNode* targetResume = linearSearchResume(resumeId);
@@ -126,7 +126,10 @@ std::vector<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatches
         topK = static_cast<int>(allMatches.size());
     }
     
-    std::vector<MatchResult> topMatches(allMatches.begin(), allMatches.begin() + topK);
+    DynamicArray<MatchResult> topMatches;
+    for (size_t i = 0; i < static_cast<size_t>(topK) && i < allMatches.size(); ++i) {
+        topMatches.push_back(allMatches[i]);
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
@@ -134,10 +137,10 @@ std::vector<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatches
     return topMatches;
 }
 
-std::vector<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatchesForJob(int jobId, int topK) {
+DynamicArray<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatchesForJob(int jobId, int topK) {
     auto start = std::chrono::high_resolution_clock::now();
     
-    std::vector<MatchResult> allMatches;
+    DynamicArray<MatchResult> allMatches;
     
     // Find the job
     JobNode* targetJob = linearSearchJob(jobId);
@@ -167,7 +170,10 @@ std::vector<LinkedListJobMatcher::MatchResult> LinkedListJobMatcher::findMatches
         topK = static_cast<int>(allMatches.size());
     }
     
-    std::vector<MatchResult> topMatches(allMatches.begin(), allMatches.begin() + topK);
+    DynamicArray<MatchResult> topMatches;
+    for (size_t i = 0; i < static_cast<size_t>(topK) && i < allMatches.size(); ++i) {
+        topMatches.push_back(allMatches[i]);
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
@@ -181,7 +187,7 @@ double LinkedListJobMatcher::calculateMatchScore(const JobNode& job, const Resum
     }
     
     // Find common skills
-    std::vector<std::string> commonSkills = findCommonSkills(job, resume);
+    StringArray commonSkills = findCommonSkills(job, resume);
     
     // Calculate weighted score
     double skillMatchRatio = (double)commonSkills.size() / job.skills.size();
@@ -206,8 +212,8 @@ double LinkedListJobMatcher::calculateMatchScore(const JobNode& job, const Resum
     return std::min(score, 1.0); // Cap at 1.0
 }
 
-std::vector<std::string> LinkedListJobMatcher::findCommonSkills(const JobNode& job, const ResumeNode& resume) {
-    std::vector<std::string> commonSkills;
+StringArray LinkedListJobMatcher::findCommonSkills(const JobNode& job, const ResumeNode& resume) {
+    StringArray commonSkills;
     
     for (const auto& jobSkill : job.skills) {
         for (const auto& resumeSkill : resume.skills) {
@@ -469,11 +475,11 @@ LinkedListJobMatcher::ResumeNode* LinkedListJobMatcher::copyResumeNode(const Res
     return newNode;
 }
 
-void LinkedListJobMatcher::displayTopMatches(const std::vector<MatchResult>& matches, int count) {
+void LinkedListJobMatcher::displayTopMatches(const DynamicArray<MatchResult>& matches, int count) {
     std::cout << "\n=== Top " << count << " Matches (Linked List) ===" << std::endl;
     std::cout << std::fixed << std::setprecision(3);
     
-    for (int i = 0; i < std::min(count, (int)matches.size()); i++) {
+    for (int i = 0; i < std::min(count, static_cast<int>(matches.size())); i++) {
         const auto& match = matches[i];
         std::cout << "\nMatch " << (i + 1) << ":" << std::endl;
         std::cout << "  Job ID: " << match.jobId << std::endl;
@@ -551,4 +557,316 @@ void LinkedListJobMatcher::displayResumeList() {
         current = current->next;
         count++;
     }
+}
+
+// Advanced filtering operations for Linked List
+DynamicArray<LinkedListJobMatcher::JobNode*> LinkedListJobMatcher::searchJobsBySkill(const std::string& skill) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<JobNode*> result;
+    result.reserve(jobCount / 10); // Reserve space for estimated matches
+    std::string lowerSkill = toLowerCase(skill);
+    
+    JobNode* current = jobHead;
+    while (current != nullptr) {
+        for (const auto& jobSkill : current->skills) {
+            if (toLowerCase(jobSkill) == lowerSkill) {
+                result.push_back(current);
+                break;
+            }
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::ResumeNode*> LinkedListJobMatcher::searchResumesBySkill(const std::string& skill) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<ResumeNode*> result;
+    std::string lowerSkill = toLowerCase(skill);
+    
+    ResumeNode* current = resumeHead;
+    while (current != nullptr) {
+        for (const auto& resumeSkill : current->skills) {
+            if (toLowerCase(resumeSkill) == lowerSkill) {
+                result.push_back(current);
+                break;
+            }
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::JobNode*> LinkedListJobMatcher::searchJobsByScoreRange(double minScore, double maxScore) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<JobNode*> result;
+    
+    JobNode* current = jobHead;
+    while (current != nullptr) {
+        if (current->matchScore >= minScore && current->matchScore <= maxScore) {
+            result.push_back(current);
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::ResumeNode*> LinkedListJobMatcher::searchResumesByScoreRange(double minScore, double maxScore) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<ResumeNode*> result;
+    
+    ResumeNode* current = resumeHead;
+    while (current != nullptr) {
+        if (current->matchScore >= minScore && current->matchScore <= maxScore) {
+            result.push_back(current);
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::JobNode*> LinkedListJobMatcher::filterJobsBySkillCount(int minSkills, int maxSkills) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<JobNode*> result;
+    
+    JobNode* current = jobHead;
+    while (current != nullptr) {
+        int skillCount = static_cast<int>(current->skills.size());
+        if (skillCount >= minSkills && skillCount <= maxSkills) {
+            result.push_back(current);
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::ResumeNode*> LinkedListJobMatcher::filterResumesBySkillCount(int minSkills, int maxSkills) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<ResumeNode*> result;
+    
+    ResumeNode* current = resumeHead;
+    while (current != nullptr) {
+        int skillCount = static_cast<int>(current->skills.size());
+        if (skillCount >= minSkills && skillCount <= maxSkills) {
+            result.push_back(current);
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::JobNode*> LinkedListJobMatcher::filterJobsByDescription(const std::string& keyword) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<JobNode*> result;
+    std::string lowerKeyword = toLowerCase(keyword);
+    
+    JobNode* current = jobHead;
+    while (current != nullptr) {
+        if (toLowerCase(current->description).find(lowerKeyword) != std::string::npos) {
+            result.push_back(current);
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+DynamicArray<LinkedListJobMatcher::ResumeNode*> LinkedListJobMatcher::filterResumesByDescription(const std::string& keyword) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    DynamicArray<ResumeNode*> result;
+    std::string lowerKeyword = toLowerCase(keyword);
+    
+    ResumeNode* current = resumeHead;
+    while (current != nullptr) {
+        if (toLowerCase(current->description).find(lowerKeyword) != std::string::npos) {
+            result.push_back(current);
+        }
+        current = current->next;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    lastSearchTime = std::chrono::duration<double, std::milli>(end - start).count();
+    
+    return result;
+}
+
+std::string LinkedListJobMatcher::toLowerCase(const std::string& str) {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
+
+// Comprehensive error handling and validation methods
+bool LinkedListJobMatcher::validateFileFormat(const std::string& filename) {
+    // Check file extension
+    if (filename.length() < 4 || filename.substr(filename.length() - 4) != ".csv") {
+        errorHandler.logError(ErrorHandler::FORMAT_ERROR, 
+            "Invalid file format: " + filename + " (expected .csv)", "validateFileFormat");
+        return false;
+    }
+    
+    // Check if file exists
+    std::ifstream testFile(filename);
+    if (!testFile.good()) {
+        errorHandler.logError(ErrorHandler::FILE_ERROR, 
+            "File does not exist or is not accessible: " + filename, "validateFileFormat");
+        return false;
+    }
+    testFile.close();
+    
+    return true;
+}
+
+bool LinkedListJobMatcher::validateMemoryAllocation() {
+    // For linked lists, we don't pre-allocate memory, so this is always valid
+    return true;
+}
+
+bool LinkedListJobMatcher::validateDataIntegrity() {
+    bool isValid = true;
+    
+    // Validate job data
+    JobNode* current = jobHead;
+    int jobIndex = 0;
+    while (current != nullptr) {
+        if (current->id <= 0) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Invalid job ID at index " + std::to_string(jobIndex), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (current->description.empty()) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Empty job description at index " + std::to_string(jobIndex), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (current->skills.empty()) {
+            errorHandler.logWarning("Job " + std::to_string(current->id) + " has no skills extracted", 
+                "Data validation");
+        }
+        
+        current = current->next;
+        jobIndex++;
+    }
+    
+    // Validate resume data
+    ResumeNode* resumeCurrent = resumeHead;
+    int resumeIndex = 0;
+    while (resumeCurrent != nullptr) {
+        if (resumeCurrent->id <= 0) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Invalid resume ID at index " + std::to_string(resumeIndex), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (resumeCurrent->description.empty()) {
+            errorHandler.logError(ErrorHandler::DATA_VALIDATION_ERROR, 
+                "Empty resume description at index " + std::to_string(resumeIndex), "validateDataIntegrity");
+            isValid = false;
+        }
+        
+        if (resumeCurrent->skills.empty()) {
+            errorHandler.logWarning("Resume " + std::to_string(resumeCurrent->id) + " has no skills extracted", 
+                "Data validation");
+        }
+        
+        resumeCurrent = resumeCurrent->next;
+        resumeIndex++;
+    }
+    
+    return isValid;
+}
+
+bool LinkedListJobMatcher::validateInputParameters(int jobId, int resumeId) {
+    bool isValid = true;
+    
+    if (jobId <= 0) {
+        errorHandler.logError(ErrorHandler::INPUT_VALIDATION_ERROR, 
+            "Invalid job ID: " + std::to_string(jobId) + " (must be positive)", "validateInputParameters");
+        isValid = false;
+    }
+    
+    if (resumeId <= 0) {
+        errorHandler.logError(ErrorHandler::INPUT_VALIDATION_ERROR, 
+            "Invalid resume ID: " + std::to_string(resumeId) + " (must be positive)", "validateInputParameters");
+        isValid = false;
+    }
+    
+    // Check if job exists
+    bool jobExists = false;
+    JobNode* current = jobHead;
+    while (current != nullptr) {
+        if (current->id == jobId) {
+            jobExists = true;
+            break;
+        }
+        current = current->next;
+    }
+    
+    if (!jobExists && jobId > 0) {
+        errorHandler.logError(ErrorHandler::BOUNDS_ERROR, 
+            "Job ID " + std::to_string(jobId) + " not found in linked list", "validateInputParameters");
+        isValid = false;
+    }
+    
+    // Check if resume exists
+    bool resumeExists = false;
+    ResumeNode* resumeCurrent = resumeHead;
+    while (resumeCurrent != nullptr) {
+        if (resumeCurrent->id == resumeId) {
+            resumeExists = true;
+            break;
+        }
+        resumeCurrent = resumeCurrent->next;
+    }
+    
+    if (!resumeExists && resumeId > 0) {
+        errorHandler.logError(ErrorHandler::BOUNDS_ERROR, 
+            "Resume ID " + std::to_string(resumeId) + " not found in linked list", "validateInputParameters");
+        isValid = false;
+    }
+    
+    return isValid;
+}
+
+void LinkedListJobMatcher::handleError(const std::string& operation, const std::string& error) {
+    errorHandler.logError(ErrorHandler::SYSTEM_ERROR, 
+        "Error in " + operation + ": " + error, "handleError");
+    std::cerr << "❌ Error in " << operation << ": " << error << std::endl;
 }

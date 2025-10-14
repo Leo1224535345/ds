@@ -3,12 +3,12 @@
 
 #include <iostream>
 #include <string>
-#include <vector>
 #include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <sstream>
 #include <cctype>
+#include "CustomContainers.hpp"
 
 /**
  * ULTRA-ADVANCED ARRAY-BASED JOB MATCHING SYSTEM
@@ -35,8 +35,8 @@ private:
         double cosineSimilarity;
         size_t descriptionHash;
         std::string description;
-        std::vector<std::string> skills;
-        std::vector<double> skillWeights;
+        StringArray skills;
+        DynamicArray<double> skillWeights;
         
         // Performance tracking
         mutable int accessCount;
@@ -57,7 +57,7 @@ private:
             std::string lowerDesc = toLowerCase(description);
             
             // Weighted skills with importance scores
-            std::vector<std::pair<std::string, double>> weightedSkills = {
+            PairArray<std::string, double> weightedSkills = {
                 // Core Programming Languages (High Weight)
                 {"python", 1.0}, {"java", 1.0}, {"javascript", 0.9}, {"sql", 0.9},
                 {"c++", 0.8}, {"c#", 0.8}, {"go", 0.7}, {"rust", 0.7},
@@ -127,6 +127,15 @@ private:
             std::transform(result.begin(), result.end(), result.begin(), ::tolower);
             return result;
         }
+        
+        // Comparison operators for sorting
+        bool operator<(const Job& other) const {
+            return matchScore > other.matchScore; // For max-heap (descending order)
+        }
+        
+        bool operator>(const Job& other) const {
+            return matchScore < other.matchScore;
+        }
     };
     
     struct alignas(64) Resume { // Cache line alignment for optimal performance
@@ -136,8 +145,8 @@ private:
         double cosineSimilarity;
         size_t descriptionHash;
         std::string description;
-        std::vector<std::string> skills;
-        std::vector<double> skillWeights;
+        StringArray skills;
+        DynamicArray<double> skillWeights;
         
         // Performance tracking
         mutable int accessCount;
@@ -158,7 +167,7 @@ private:
             std::string lowerDesc = toLowerCase(description);
             
             // Weighted skills with importance scores (same as Job)
-            std::vector<std::pair<std::string, double>> weightedSkills = {
+            PairArray<std::string, double> weightedSkills = {
                 // Core Programming Languages (High Weight)
                 {"python", 1.0}, {"java", 1.0}, {"javascript", 0.9}, {"sql", 0.9},
                 {"c++", 0.8}, {"c#", 0.8}, {"go", 0.7}, {"rust", 0.7},
@@ -228,6 +237,15 @@ private:
             std::transform(result.begin(), result.end(), result.begin(), ::tolower);
             return result;
         }
+        
+        // Comparison operators for sorting
+        bool operator<(const Resume& other) const {
+            return matchScore > other.matchScore; // For max-heap (descending order)
+        }
+        
+        bool operator>(const Resume& other) const {
+            return matchScore < other.matchScore;
+        }
     };
     
     // Advanced matching result with comprehensive metrics
@@ -241,8 +259,13 @@ private:
         double skillMatchRatio;
         double coverageRatio;
         double confidence;
-        std::vector<std::string> commonSkills;
-        std::vector<double> skillRelevanceScores;
+        StringArray commonSkills;
+        DynamicArray<double> skillRelevanceScores;
+        
+        // Default constructor
+        MatchResult() : jobId(0), resumeId(0), overallScore(0.0), tfIdfScore(0.0), 
+                       cosineSimilarity(0.0), jaccardSimilarity(0.0), 
+                       skillMatchRatio(0.0), coverageRatio(0.0), confidence(0.0) {}
         
         MatchResult(int jId, int rId, double s) : jobId(jId), resumeId(rId), overallScore(s),
             tfIdfScore(0.0), cosineSimilarity(0.0), jaccardSimilarity(0.0), 
@@ -292,7 +315,70 @@ private:
         }
     };
     
+    // Comprehensive error handling and validation
+    struct ErrorHandler {
+        enum ErrorType {
+            FILE_ERROR,
+            MEMORY_ERROR,
+            DATA_VALIDATION_ERROR,
+            INPUT_VALIDATION_ERROR,
+            BOUNDS_ERROR,
+            FORMAT_ERROR,
+            SYSTEM_ERROR
+        };
+        
+        struct ErrorInfo {
+            ErrorType type;
+            std::string message;
+            std::string context;
+            int errorCode;
+            bool isRecoverable;
+            
+            // Default constructor
+            ErrorInfo() : type(FILE_ERROR), message(""), context(""), errorCode(0), isRecoverable(true) {}
+            
+            ErrorInfo(ErrorType t, const std::string& msg, const std::string& ctx = "", 
+                     int code = 0, bool recoverable = true)
+                : type(t), message(msg), context(ctx), errorCode(code), isRecoverable(recoverable) {}
+        };
+        
+        DynamicArray<ErrorInfo> errorLog;
+        bool hasErrors = false;
+        bool hasWarnings = false;
+        
+        void logError(ErrorType type, const std::string& message, const std::string& context = "", int code = 0) {
+            errorLog.emplace_back(type, message, context, code);
+            hasErrors = true;
+        }
+        
+        void logWarning(const std::string& message, const std::string& context = "") {
+            errorLog.emplace_back(DATA_VALIDATION_ERROR, "WARNING: " + message, context, 0, true);
+            hasWarnings = true;
+        }
+        
+        void clearErrors() {
+            errorLog.clear();
+            hasErrors = false;
+            hasWarnings = false;
+        }
+        
+        std::string getErrorSummary() const {
+            if (errorLog.empty()) return "No errors detected";
+            
+            std::string summary = "Error Summary:\n";
+            for (const auto& error : errorLog) {
+                summary += "- " + error.message;
+                if (!error.context.empty()) {
+                    summary += " (Context: " + error.context + ")";
+                }
+                summary += "\n";
+            }
+            return summary;
+        }
+    };
+    
     mutable PerformanceMetrics metrics;
+    mutable ErrorHandler errorHandler;
     
 public:
     ArrayJobMatcher(int maxJobSize = 10000, int maxResumeSize = 10000);
@@ -307,13 +393,15 @@ public:
     void addResume(const Resume& resume);
     Job* getJob(int index);
     Resume* getResume(int index);
+    Job getJobById(int id);
+    Resume getResumeById(int id);
     int getJobCount() const { return jobCount; }
     int getResumeCount() const { return resumeCount; }
     
     // Advanced job matching algorithms
-    std::vector<MatchResult> findMatches(int resumeId, int topK = 10);
-    std::vector<MatchResult> findMatchesForJob(int jobId, int topK = 10);
-    std::vector<MatchResult> findMatchesWithThreshold(int resumeId, double minScore, int maxResults = 100);
+    DynamicArray<MatchResult> findMatches(int resumeId, int topK = 10);
+    DynamicArray<MatchResult> findMatchesForJob(int jobId, int topK = 10);
+    DynamicArray<MatchResult> findMatchesWithThreshold(int resumeId, double minScore, int maxResults = 100);
     double calculateAdvancedMatchScore(const Job& job, const Resume& resume);
     double calculateTFIDFScore(const Job& job, const Resume& resume);
     double calculateCosineSimilarity(const Job& job, const Resume& resume);
@@ -344,10 +432,16 @@ public:
     Resume* interpolationSearchResume(int resumeId);
     Job* linearSearchJob(int jobId);
     Resume* linearSearchResume(int resumeId);
-    std::vector<Job*> searchJobsBySkill(const std::string& skill);
-    std::vector<Resume*> searchResumesBySkill(const std::string& skill);
-    std::vector<Job*> searchJobsByScoreRange(double minScore, double maxScore);
-    std::vector<Resume*> searchResumesByScoreRange(double minScore, double maxScore);
+    DynamicArray<Job*> searchJobsBySkill(const std::string& skill);
+    DynamicArray<Resume*> searchResumesBySkill(const std::string& skill);
+    DynamicArray<Job*> searchJobsByScoreRange(double minScore, double maxScore);
+    DynamicArray<Resume*> searchResumesByScoreRange(double minScore, double maxScore);
+    
+    // Advanced filtering operations
+    DynamicArray<Job*> filterJobsBySkillCount(int minSkills, int maxSkills);
+    DynamicArray<Resume*> filterResumesBySkillCount(int minSkills, int maxSkills);
+    DynamicArray<Job*> filterJobsByDescription(const std::string& keyword);
+    DynamicArray<Resume*> filterResumesByDescription(const std::string& keyword);
     
     // Advanced performance analysis
     const PerformanceMetrics& getPerformanceMetrics() const { return metrics; }
@@ -363,8 +457,20 @@ public:
     void displayUltraDetailedPerformanceAnalysis();
     void generatePerformanceReport(const std::string& filename);
     
+    // Comprehensive error handling and validation
+    bool hasErrors() const { return errorHandler.hasErrors; }
+    bool hasWarnings() const { return errorHandler.hasWarnings; }
+    const ErrorHandler& getErrorHandler() const { return errorHandler; }
+    std::string getErrorSummary() const { return errorHandler.getErrorSummary(); }
+    void clearErrors() { errorHandler.clearErrors(); }
+    bool validateDataIntegrity();
+    bool validateInputParameters(int jobId, int resumeId);
+    bool validateFileFormat(const std::string& filename);
+    bool validateMemoryAllocation();
+    void handleError(const std::string& operation, const std::string& error);
+    
     // Advanced utility methods
-    void displayTopMatches(const std::vector<MatchResult>& matches, int count = 5);
+    void displayTopMatches(const DynamicArray<MatchResult>& matches, int count = 5);
     void displayPerformanceStats();
     void validateData();
     void optimizeForSearch();
@@ -385,10 +491,11 @@ private:
     void optimizeMemoryLayout();
     void prefetchData();
     void preventFalseSharing();
+    std::string toLowerCase(const std::string& str);
     
     // Advanced matching algorithms
-    std::vector<std::string> findCommonSkills(const Job& job, const Resume& resume);
-    std::vector<std::pair<std::string, double>> findCommonSkillsWithWeights(const Job& job, const Resume& resume);
+    StringArray findCommonSkills(const Job& job, const Resume& resume);
+    PairArray<std::string, double> findCommonSkillsWithWeights(const Job& job, const Resume& resume);
     double calculateSkillRelevance(const std::string& skill, const std::string& context);
     double calculateSemanticSimilarity(const Job& job, const Resume& resume);
     
